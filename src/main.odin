@@ -14,7 +14,6 @@ main :: proc() {
 
 	rl.SetTargetFPS(10)
 
-
 	gs := gamestate.create(
 		snake.create(
 			{
