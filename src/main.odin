@@ -1,28 +1,28 @@
 package main
 
+import "core:log"
 import "core:math/rand"
 import "src:gamestate"
-import "src:snake"
 import rl "vendor:raylib"
 
 main :: proc() {
+	when !ODIN_DEBUG {
+		rl.SetTraceLogLevel(.ERROR)
+		context.logger = log.create_console_logger(.Error)
+	} else {
+		context.logger = log.create_console_logger()
+	}
+	defer log.destroy_console_logger(context.logger)
+
 	rg := rand.create(1337)
 	context.random_generator = rand.default_random_generator(&rg)
 
 
 	rl.InitWindow(gamestate.WIDTH, gamestate.HEIGHT, "Snake Game");defer rl.CloseWindow()
 
-	rl.SetTargetFPS(10)
+	rl.SetTargetFPS(15)
 
-	gs := gamestate.create(
-		snake.create(
-			{
-				0 = (gamestate.WIDTH / 2) - snake.SNAKE_WIDTH,
-				1 = (gamestate.HEIGHT / 2) - snake.SNAKE_HEIGHT,
-			},
-			length = 4,
-		),
-	)
+	gs := gamestate.create()
 	defer gamestate.destroy(&gs)
 
 

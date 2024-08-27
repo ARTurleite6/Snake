@@ -3,12 +3,23 @@ package gamestate
 import "core:fmt"
 import "core:log"
 import "core:math/rand"
+import "core:os"
+import "core:path/filepath"
+import "core:strconv"
 import "core:strings"
 import "src:snake"
 import rl "vendor:raylib"
 
+when ODIN_OS == .Linux || ODIN_OS == .Darwin {
+	SCORE_PATH :: ".cache/snake/highscore.txt"
+} else {
+	SCORE_PATH :: "/AppData/Local/snake/highscore.txt"
+}
+
 FOOD_WIDTH :: 32
 FOOD_HEIGHT :: 30
+
+SNAKE_INITIAL_LENGTH :: 4
 
 WIDTH :: 1024
 HEIGHT :: 720
@@ -17,10 +28,12 @@ MAX_NUMBER_TILES_X :: WIDTH / FOOD_WIDTH
 MAX_NUMBER_TILES_Y :: HEIGHT / FOOD_HEIGHT
 
 Game_State :: struct {
-	snake: snake.Snake,
-	score: uint,
-	state: State,
-	food:  rl.Vector2,
+	snake:              snake.Snake,
+	score:              uint,
+	highest_score:      uint,
+	highest_score_path: string,
+	state:              State,
+	food:               rl.Vector2,
 }
 
 State :: enum {
@@ -30,17 +43,76 @@ State :: enum {
 	Lost,
 }
 
-create :: proc(snake: snake.Snake) -> Game_State {
+create :: proc(allocator := context.allocator) -> Game_State {
+	score_path := get_score_path(allocator)
+	high_score := get_high_score(score_path)
+
 	state := Game_State {
-		state = .NotStarted,
-		snake = snake,
-		score = 0,
+		state              = .NotStarted,
+		snake              = snake.create(
+			{(WIDTH / 2) - snake.SNAKE_WIDTH, (HEIGHT / 2) - snake.SNAKE_HEIGHT},
+			length = SNAKE_INITIAL_LENGTH,
+		),
+		highest_score      = high_score,
+		highest_score_path = score_path,
+		score              = 0,
 	}
 	generate_food(&state)
 	return state
 }
 
+@(private)
+save_highest_score :: proc(state: ^Game_State) {
+	score_path, score := state.highest_score_path, state.highest_score
+
+	if state.score > score {
+		log.infof("Reached a highest score in this run, new: %d, old: %d", state.score, score)
+		if ok := os.write_entire_file(
+			score_path,
+			transmute([]u8)fmt.aprintf("%d\n", state.score, allocator = context.temp_allocator),
+		); !ok {
+			log.errorf("Error writing highest score to %s file", score_path)
+		}
+		log.infof("Score of %d saved to %s file", state.score, score_path)
+	}
+}
+
+@(private)
+get_high_score :: proc(path: string) -> uint {
+	log.info("Storing the highest score")
+	score: uint
+	if data, ok := os.read_entire_file(path, context.temp_allocator); !ok {
+		score = 0
+	} else {
+		score = strconv.parse_uint(strings.trim_space(string(data)), 10) or_else 0
+	}
+	return score
+}
+
+@(private)
+get_score_path :: proc(allocator := context.allocator) -> string {
+	context.allocator = allocator
+	when ODIN_OS == .Linux || ODIN_OS == .Darwin {
+		home_path := os.get_env("HOME")
+	} else {
+		home_path := os.get_env("USERPROFILE")
+	}
+
+	path := fmt.aprintf("%s/%s", home_path, SCORE_PATH)
+	dir := filepath.dir(path)
+	if !os.exists(dir) {
+		os.make_directory(dir)
+	}
+
+	if new_path, allocation := filepath.from_slash(path); allocation {
+		delete(path)
+		path = new_path
+	}
+	return path
+}
+
 game_clear :: proc(state: ^Game_State) {
+	save_highest_score(state)
 	state.state = .NotStarted
 	state.score = 0
 	snake.snake_clear(
@@ -52,6 +124,8 @@ game_clear :: proc(state: ^Game_State) {
 }
 
 destroy :: proc(state: ^Game_State) {
+	save_highest_score(state)
+	delete(state.highest_score_path)
 	snake.destroy(&state.snake)
 }
 
@@ -92,13 +166,13 @@ generate_food :: proc(state: ^Game_State, allocator := context.temp_allocator) {
 
 change_snake_direction :: proc(s: ^snake.Snake) {
 	change_direction: Maybe(snake.Directions) = nil
-	if (rl.IsKeyDown(.A)) {
+	if (rl.IsKeyDown(.A) || rl.IsKeyDown(.LEFT)) {
 		change_direction = .LEFT
-	} else if (rl.IsKeyDown(.S)) {
+	} else if (rl.IsKeyDown(.S) || rl.IsKeyDown(.DOWN)) {
 		change_direction = .DOWN
-	} else if (rl.IsKeyDown(.D)) {
+	} else if (rl.IsKeyDown(.D) || rl.IsKeyDown(.RIGHT)) {
 		change_direction = .RIGHT
-	} else if (rl.IsKeyDown(.W)) {
+	} else if (rl.IsKeyDown(.W) || rl.IsKeyDown(.UP)) {
 		change_direction = .UP
 	}
 
@@ -124,16 +198,23 @@ update :: proc(state: ^Game_State) {
 	handle_input(state)
 
 	if (state.state == .Running) {
-		snake.move(&state.snake)
-
-		head := state.snake.body[0]
-
-		if head.position.x == 0 ||
-		   head.position.x == WIDTH - FOOD_WIDTH ||
-		   head.position.y == 0 ||
-		   head.position.y == HEIGHT - FOOD_HEIGHT {
-			state.state = .Lost
+		head := &state.snake.body[0]
+		if head.position.x + snake.SNAKE_WIDTH <= 0 || head.position.x >= WIDTH {
+			log.debugf(
+				"Old position = %v, new position = %v\n",
+				head.position.x,
+				WIDTH - head.position.x - snake.SNAKE_WIDTH,
+			)
+			head.position.x = WIDTH - head.position.x - snake.SNAKE_WIDTH
+		} else if head.position.y + snake.SNAKE_HEIGHT <= 0 || head.position.y >= HEIGHT {
+			log.debugf(
+				"Old position = %v, new position = %v\n",
+				head.position.y,
+				HEIGHT - head.position.y - snake.SNAKE_HEIGHT,
+			)
+			head.position.y = HEIGHT - head.position.y - snake.SNAKE_HEIGHT
 		}
+		snake.move(&state.snake)
 
 		for part in state.snake.body[1:] {
 			if head.position == part.position {
@@ -145,6 +226,7 @@ update :: proc(state: ^Game_State) {
 		if state.snake.body[0].position == state.food {
 			snake.add_body(&state.snake)
 			state.score += 1
+			if state.score > state.highest_score do state.highest_score = state.score
 			log.logf(
 				.Debug,
 				"Snake eated food, new length is %d, score %d",
@@ -162,15 +244,8 @@ draw :: proc(state: Game_State) {
 
 	rl.DrawRectangle(i32(state.food.x), i32(state.food.y), FOOD_WIDTH, FOOD_HEIGHT, rl.RED)
 
-	for x in 0 ..< WIDTH {
-		rl.DrawRectangle(i32(x), 0, FOOD_WIDTH, FOOD_HEIGHT, rl.GRAY)
-		rl.DrawRectangle(i32(x), HEIGHT - FOOD_HEIGHT, FOOD_WIDTH, FOOD_HEIGHT, rl.GRAY)
-	}
-
-	for y in 0 ..< HEIGHT {
-		rl.DrawRectangle(0, i32(y), FOOD_WIDTH, FOOD_HEIGHT, rl.GRAY)
-		rl.DrawRectangle(WIDTH - FOOD_WIDTH, i32(y), FOOD_WIDTH, FOOD_HEIGHT, rl.GRAY)
-	}
+	high_score_msg := fmt.ctprintf("HIGH SCORE: %d", state.highest_score)
+	rl.DrawText(high_score_msg, WIDTH - 220, 40, 20, rl.WHITE)
 
 	switch state.state {
 	case .NotStarted:
